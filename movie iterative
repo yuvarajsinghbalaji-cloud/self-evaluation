@@ -1,0 +1,405 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define PORT 8080
+#define MAX 100
+
+struct Movie {
+    int id;
+    char name[50];
+    char time[20];
+    int seats;
+    float price;
+};
+
+struct Booking {
+    int booking_id;
+    char movie[50];
+    char time[20];
+    int seats;
+    float amount;
+    int active;
+};
+
+struct Movie movies[] = {
+    {1, "Leo", "10:00 AM", 50, 150},
+    {2, "Jailer", "02:00 PM", 40, 120},
+    {3, "GOAT", "06:00 PM", 60, 180}
+};
+
+struct Booking bookings[MAX];
+int booking_count = 0;
+int next_booking_id = 1001;
+
+void send_movies(int client)
+{
+    char msg[2048] = "----- MOVIE LIST -----\n";
+
+    for (int i = 0; i < 3; i++) {
+        char temp[200];
+
+        sprintf(temp,
+                "ID: %d | Movie: %s | Time: %s | Seats: %d | Price: Rs.%.2f\n",
+                movies[i].id,
+                movies[i].name,
+                movies[i].time,
+                movies[i].seats,
+                movies[i].price);
+
+        strcat(msg, temp);
+    }
+
+    send(client, msg, strlen(msg), 0);
+}
+
+void check_seats(int client, int id)
+{
+    char msg[200];
+
+    if (id < 1 || id > 3) {
+        strcpy(msg, "Invalid movie ID.\n");
+    } else {
+        sprintf(msg,
+                "%s - %s : %d seats available\n",
+                movies[id - 1].name,
+                movies[id - 1].time,
+                movies[id - 1].seats);
+    }
+
+    send(client, msg, strlen(msg), 0);
+}
+
+void book_ticket(int client, int id, int seats)
+{
+    char msg[300];
+
+    if (id < 1 || id > 3) {
+        strcpy(msg, "Booking failed: Invalid movie ID.\n");
+    }
+    else if (seats <= 0) {
+        strcpy(msg, "Booking failed: Invalid number of seats.\n");
+    }
+    else if (seats > movies[id - 1].seats) {
+        sprintf(msg,
+                "Booking failed: Only %d seats available.\n",
+                movies[id - 1].seats);
+    }
+    else {
+        struct Booking *b = &bookings[booking_count];
+
+        b->booking_id = next_booking_id++;
+        strcpy(b->movie, movies[id - 1].name);
+        strcpy(b->time, movies[id - 1].time);
+        b->seats = seats;
+        b->amount = seats * movies[id - 1].price;
+        b->active = 1;
+
+        movies[id - 1].seats -= seats;
+        booking_count++;
+
+        sprintf(msg,
+                "Booking successful!\n"
+                "Booking ID: %d\n"
+                "Movie: %s\n"
+                "Time: %s\n"
+                "Seats: %d\n"
+                "Amount: Rs.%.2f\n",
+                b->booking_id,
+                b->movie,
+                b->time,
+                b->seats,
+                b->amount);
+    }
+
+    send(client, msg, strlen(msg), 0);
+}
+
+void cancel_ticket(int client, int booking_id)
+{
+    char msg[300];
+
+    for (int i = 0; i < booking_count; i++) {
+
+        if (bookings[i].booking_id == booking_id &&
+            bookings[i].active == 1) {
+
+            bookings[i].active = 0;
+
+            /* Return seats to the corresponding movie */
+            for (int j = 0; j < 3; j++) {
+                if (strcmp(movies[j].name, bookings[i].movie) == 0 &&
+                    strcmp(movies[j].time, bookings[i].time) == 0) {
+
+                    movies[j].seats += bookings[i].seats;
+                    break;
+                }
+            }
+
+            sprintf(msg,
+                    "Booking %d cancelled successfully.\n"
+                    "%d seats are now available.\n",
+                    booking_id,
+                    bookings[i].seats);
+
+            send(client, msg, strlen(msg), 0);
+            return;
+        }
+    }
+
+    strcpy(msg, "Cancellation failed: Invalid or already cancelled booking.\n");
+    send(client, msg, strlen(msg), 0);
+}
+
+void booking_details(int client, int booking_id)
+{
+    char msg[300];
+
+    for (int i = 0; i < booking_count; i++) {
+
+        if (bookings[i].booking_id == booking_id &&
+            bookings[i].active == 1) {
+
+            sprintf(msg,
+                    "----- BOOKING DETAILS -----\n"
+                    "Booking ID: %d\n"
+                    "Movie: %s\n"
+                    "Time: %s\n"
+                    "Seats: %d\n"
+                    "Amount: Rs.%.2f\n"
+                    "Status: Active\n",
+                    bookings[i].booking_id,
+                    bookings[i].movie,
+                    bookings[i].time,
+                    bookings[i].seats,
+                    bookings[i].amount);
+
+            send(client, msg, strlen(msg), 0);
+            return;
+        }
+    }
+
+    strcpy(msg, "Booking not found.\n");
+    send(client, msg, strlen(msg), 0);
+}
+
+int main()
+{
+    int server_fd, client_fd;
+    struct sockaddr_in server, client;
+    socklen_t len = sizeof(client);
+    char buffer[1024];
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (server_fd < 0) {
+        perror("Socket error");
+        exit(1);
+    }
+
+    server.sin_family = AF_INET;
+    server.sin_addr.s_addr = INADDR_ANY;
+    server.sin_port = htons(PORT);
+
+    bind(server_fd, (struct sockaddr *)&server, sizeof(server));
+    listen(server_fd, 5);
+
+    printf("Movie Ticket Server started...\n");
+    printf("Waiting for client...\n");
+
+    while (1) {
+
+        client_fd = accept(server_fd,
+                           (struct sockaddr *)&client,
+                           &len);
+
+        printf("Client connected.\n");
+
+        while (1) {
+
+            memset(buffer, 0, sizeof(buffer));
+
+            int n = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+
+            if (n <= 0)
+                break;
+
+            int choice, id, seats, booking_id;
+
+            sscanf(buffer, "%d %d %d",
+                   &choice, &id, &seats);
+
+            switch (choice) {
+
+                case 1:
+                    send_movies(client_fd);
+                    break;
+
+                case 2:
+                    check_seats(client_fd, id);
+                    break;
+
+                case 3:
+                    book_ticket(client_fd, id, seats);
+                    break;
+
+                case 4:
+                    cancel_ticket(client_fd, id);
+                    break;
+
+                case 5:
+                    booking_details(client_fd, id);
+                    break;
+
+                case 6:
+                    send(client_fd, "Goodbye!\n", 9, 0);
+                    close(client_fd);
+                    printf("Client disconnected.\n");
+                    goto next_client;
+
+                default:
+                    send(client_fd,
+                         "Invalid choice.\n",
+                         16, 0);
+            }
+        }
+
+        close(client_fd);
+
+        next_client:
+        printf("Waiting for next client...\n");
+    }
+
+    close(server_fd);
+
+    return 0;
+}
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define PORT 8080
+
+int main()
+{
+    int sock;
+    struct sockaddr_in server;
+    char buffer[4096];
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (sock < 0) {
+        perror("Socket error");
+        exit(1);
+    }
+
+    server.sin_family = AF_INET;
+    server.sin_port = htons(PORT);
+    server.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if (connect(sock,
+                (struct sockaddr *)&server,
+                sizeof(server)) < 0) {
+
+        perror("Connection failed");
+        exit(1);
+    }
+
+    printf("Connected to Movie Ticket Server!\n");
+
+    while (1) {
+
+        int choice, id, seats;
+
+        printf("\n===== MOVIE TICKET BOOKING =====\n");
+        printf("1. View Movies\n");
+        printf("2. Check Seat Availability\n");
+        printf("3. Book Tickets\n");
+        printf("4. Cancel Booking\n");
+        printf("5. Booking Details\n");
+        printf("6. Exit\n");
+        printf("Enter choice: ");
+
+        scanf("%d", &choice);
+
+        if (choice == 1) {
+
+            sprintf(buffer, "1");
+        }
+
+        else if (choice == 2) {
+
+            printf("Enter Movie ID: ");
+            scanf("%d", &id);
+
+            sprintf(buffer, "2 %d", id);
+        }
+
+        else if (choice == 3) {
+
+            printf("Enter Movie ID: ");
+            scanf("%d", &id);
+
+            printf("Enter number of seats: ");
+            scanf("%d", &seats);
+
+            sprintf(buffer, "3 %d %d", id, seats);
+        }
+
+        else if (choice == 4) {
+
+            printf("Enter Booking ID: ");
+            scanf("%d", &id);
+
+            sprintf(buffer, "4 %d", id);
+        }
+
+        else if (choice == 5) {
+
+            printf("Enter Booking ID: ");
+            scanf("%d", &id);
+
+            sprintf(buffer, "5 %d", id);
+        }
+
+        else if (choice == 6) {
+
+            sprintf(buffer, "6");
+            send(sock, buffer, strlen(buffer), 0);
+
+            memset(buffer, 0, sizeof(buffer));
+            recv(sock, buffer, sizeof(buffer) - 1, 0);
+
+            printf("%s", buffer);
+            break;
+        }
+
+        else {
+
+            printf("Invalid choice!\n");
+            continue;
+        }
+
+        send(sock, buffer, strlen(buffer), 0);
+
+        memset(buffer, 0, sizeof(buffer));
+
+        int n = recv(sock,
+                     buffer,
+                     sizeof(buffer) - 1,
+                     0);
+
+        if (n > 0)
+            printf("\n%s\n", buffer);
+    }
+
+    close(sock);
+
+    return 0;
+}
