@@ -1,0 +1,602 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <time.h>
+
+#define PORT 8080
+#define MAX_PATIENTS 100
+#define MAX_APPOINTMENTS 100
+
+struct Doctor
+{
+    int id;
+    char name[50];
+    char specialization[50];
+    char time[20];
+    int slots;
+};
+
+struct Patient
+{
+    int id;
+    char name[50];
+    int age;
+};
+
+struct Appointment
+{
+    int id;
+    int patient_id;
+    int doctor_id;
+    char doctor_name[50];
+    char time[20];
+    int active;
+};
+
+struct Doctor doctors[] =
+{
+    {1, "Dr. Kumar", "Cardiologist", "10:00 AM", 5},
+    {2, "Dr. Priya", "Dermatologist", "11:00 AM", 4},
+    {3, "Dr. Ravi", "Neurologist", "02:00 PM", 3}
+};
+
+struct Patient patients[MAX_PATIENTS];
+struct Appointment appointments[MAX_APPOINTMENTS];
+
+int patient_count = 0;
+int appointment_count = 0;
+int next_patient_id = 1001;
+int next_appointment_id = 5001;
+
+/* Log operations */
+void log_operation(char *operation)
+{
+    FILE *fp;
+    time_t now;
+
+    fp = fopen("hospital_log.txt", "a");
+
+    if (fp == NULL)
+        return;
+
+    time(&now);
+
+    fprintf(fp, "%s : %s", operation, ctime(&now));
+
+    fclose(fp);
+}
+
+/* Register patient */
+void register_patient(int client, char *name, int age)
+{
+    char msg[300];
+
+    if (age <= 0 || age > 120)
+    {
+        strcpy(msg, "Registration failed: Invalid age.\n");
+        send(client, msg, strlen(msg), 0);
+        log_operation("Invalid patient registration");
+        return;
+    }
+
+    if (patient_count >= MAX_PATIENTS)
+    {
+        strcpy(msg, "Registration failed: Patient limit reached.\n");
+        send(client, msg, strlen(msg), 0);
+        return;
+    }
+
+    patients[patient_count].id = next_patient_id++;
+    strcpy(patients[patient_count].name, name);
+    patients[patient_count].age = age;
+
+    sprintf(msg,
+            "Patient registered successfully!\n"
+            "Patient ID: %d\n"
+            "Name: %s\n"
+            "Age: %d\n",
+            patients[patient_count].id,
+            patients[patient_count].name,
+            patients[patient_count].age);
+
+    send(client, msg, strlen(msg), 0);
+
+    log_operation("Patient registered");
+
+    patient_count++;
+}
+
+/* Search doctor availability */
+void search_doctors(int client)
+{
+    char msg[2000] = "----- DOCTOR AVAILABILITY -----\n";
+
+    for (int i = 0; i < 3; i++)
+    {
+        char temp[300];
+
+        sprintf(temp,
+                "Doctor ID: %d | Name: %s | Specialization: %s | "
+                "Time: %s | Available Slots: %d\n",
+                doctors[i].id,
+                doctors[i].name,
+                doctors[i].specialization,
+                doctors[i].time,
+                doctors[i].slots);
+
+        strcat(msg, temp);
+    }
+
+    send(client, msg, strlen(msg), 0);
+}
+
+/* Book appointment */
+void book_appointment(int client, int patient_id, int doctor_id)
+{
+    char msg[400];
+    int patient_found = 0;
+    int doctor_found = 0;
+
+    /* Check patient */
+    for (int i = 0; i < patient_count; i++)
+    {
+        if (patients[i].id == patient_id)
+        {
+            patient_found = 1;
+            break;
+        }
+    }
+
+    if (!patient_found)
+    {
+        strcpy(msg, "Booking failed: Patient ID not found.\n");
+        send(client, msg, strlen(msg), 0);
+        log_operation("Invalid patient ID during booking");
+        return;
+    }
+
+    /* Check doctor */
+    for (int i = 0; i < 3; i++)
+    {
+        if (doctors[i].id == doctor_id)
+        {
+            doctor_found = 1;
+
+            if (doctors[i].slots <= 0)
+            {
+                strcpy(msg,
+                       "Booking failed: No appointment slots available.\n");
+
+                send(client, msg, strlen(msg), 0);
+                log_operation("Booking failed - No slots");
+                return;
+            }
+
+            appointments[appointment_count].id =
+                next_appointment_id++;
+
+            appointments[appointment_count].patient_id = patient_id;
+            appointments[appointment_count].doctor_id = doctor_id;
+
+            strcpy(appointments[appointment_count].doctor_name,
+                   doctors[i].name);
+
+            strcpy(appointments[appointment_count].time,
+                   doctors[i].time);
+
+            appointments[appointment_count].active = 1;
+
+            doctors[i].slots--;
+
+            sprintf(msg,
+                    "Appointment booked successfully!\n"
+                    "Appointment ID: %d\n"
+                    "Patient ID: %d\n"
+                    "Doctor: %s\n"
+                    "Consultation Time: %s\n",
+                    appointments[appointment_count].id,
+                    patient_id,
+                    doctors[i].name,
+                    doctors[i].time);
+
+            appointment_count++;
+
+            send(client, msg, strlen(msg), 0);
+
+            log_operation("Appointment booked");
+
+            return;
+        }
+    }
+
+    if (!doctor_found)
+    {
+        strcpy(msg, "Booking failed: Invalid Doctor ID.\n");
+        send(client, msg, strlen(msg), 0);
+        log_operation("Invalid doctor ID during booking");
+    }
+}
+
+/* Cancel appointment */
+void cancel_appointment(int client, int appointment_id)
+{
+    char msg[300];
+
+    for (int i = 0; i < appointment_count; i++)
+    {
+        if (appointments[i].id == appointment_id)
+        {
+            if (appointments[i].active == 0)
+            {
+                strcpy(msg, "Cancellation failed: Already cancelled.\n");
+
+                send(client, msg, strlen(msg), 0);
+
+                log_operation("Already cancelled appointment");
+
+                return;
+            }
+
+            appointments[i].active = 0;
+
+            /* Return slot to doctor */
+            for (int j = 0; j < 3; j++)
+            {
+                if (doctors[j].id == appointments[i].doctor_id)
+                {
+                    doctors[j].slots++;
+                    break;
+                }
+            }
+
+            sprintf(msg,
+                    "Appointment cancelled successfully!\n"
+                    "Appointment ID: %d\n",
+                    appointment_id);
+
+            send(client, msg, strlen(msg), 0);
+
+            log_operation("Appointment cancelled");
+
+            return;
+        }
+    }
+
+    strcpy(msg, "Cancellation failed: Appointment ID not found.\n");
+
+    send(client, msg, strlen(msg), 0);
+
+    log_operation("Invalid appointment cancellation");
+}
+
+/* Appointment history */
+void appointment_history(int client, int patient_id)
+{
+    char msg[3000] = "----- APPOINTMENT HISTORY -----\n";
+    int found = 0;
+
+    for (int i = 0; i < appointment_count; i++)
+    {
+        if (appointments[i].patient_id == patient_id)
+        {
+            char temp[300];
+
+            found = 1;
+
+            sprintf(temp,
+                    "Appointment ID: %d | Doctor: %s | "
+                    "Time: %s | Status: %s\n",
+                    appointments[i].id,
+                    appointments[i].doctor_name,
+                    appointments[i].time,
+                    appointments[i].active ? "Active" : "Cancelled");
+
+            strcat(msg, temp);
+        }
+    }
+
+    if (!found)
+        strcpy(msg, "No appointment history found.\n");
+
+    send(client, msg, strlen(msg), 0);
+}
+
+/* Main */
+int main()
+{
+    int server_fd, client_fd;
+    struct sockaddr_in server, client;
+    socklen_t client_len;
+    char buffer[1024];
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (server_fd < 0)
+    {
+        perror("Socket error");
+        exit(1);
+    }
+
+    server.sin_family = AF_INET;
+    server.sin_addr.s_addr = INADDR_ANY;
+    server.sin_port = htons(PORT);
+
+    if (bind(server_fd,
+             (struct sockaddr *)&server,
+             sizeof(server)) < 0)
+    {
+        perror("Bind error");
+        exit(1);
+    }
+
+    listen(server_fd, 5);
+
+    printf("====================================\n");
+    printf(" Hospital Appointment Server\n");
+    printf("====================================\n");
+    printf("Server started on port %d\n", PORT);
+
+    while (1)
+    {
+        client_len = sizeof(client);
+
+        printf("\nWaiting for client...\n");
+
+        client_fd = accept(server_fd,
+                           (struct sockaddr *)&client,
+                           &client_len);
+
+        if (client_fd < 0)
+        {
+            perror("Accept error");
+            continue;
+        }
+
+        printf("Client connected.\n");
+
+        /* Complete client request handling */
+        while (1)
+        {
+            memset(buffer, 0, sizeof(buffer));
+
+            int n = recv(client_fd,
+                         buffer,
+                         sizeof(buffer) - 1,
+                         0);
+
+            if (n <= 0)
+                break;
+
+            int choice, id, age;
+            char name[100];
+
+            sscanf(buffer, "%d", &choice);
+
+            switch (choice)
+            {
+                case 1:
+                    /* Format: 1 name age */
+                    sscanf(buffer, "%d %s %d",
+                           &choice, name, &age);
+
+                    register_patient(client_fd, name, age);
+                    break;
+
+                case 2:
+                    search_doctors(client_fd);
+                    break;
+
+                case 3:
+                    /* Format: 3 patient_id doctor_id */
+                    sscanf(buffer, "%d %d %d",
+                           &choice, &id, &age);
+
+                    book_appointment(client_fd, id, age);
+                    break;
+
+                case 4:
+                    /* Format: 4 appointment_id */
+                    sscanf(buffer, "%d %d",
+                           &choice, &id);
+
+                    cancel_appointment(client_fd, id);
+                    break;
+
+                case 5:
+                    /* Format: 5 patient_id */
+                    sscanf(buffer, "%d %d",
+                           &choice, &id);
+
+                    appointment_history(client_fd, id);
+                    break;
+
+                case 6:
+                    send(client_fd,
+                         "Thank you! Connection closed.\n",
+                         31, 0);
+
+                    close(client_fd);
+
+                    printf("Client disconnected.\n");
+
+                    goto next_client;
+
+                default:
+                    send(client_fd,
+                         "Invalid choice. Please try again.\n",
+                         35, 0);
+
+                    log_operation("Invalid menu choice");
+            }
+        }
+
+        close(client_fd);
+
+next_client:
+        printf("Ready for next client.\n");
+    }
+
+    close(server_fd);
+
+    return 0;
+}
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define PORT 8080
+
+int main()
+{
+    int sock;
+    struct sockaddr_in server;
+    char buffer[4096];
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (sock < 0)
+    {
+        perror("Socket error");
+        exit(1);
+    }
+
+    server.sin_family = AF_INET;
+    server.sin_port = htons(PORT);
+    server.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if (connect(sock,
+                (struct sockaddr *)&server,
+                sizeof(server)) < 0)
+    {
+        perror("Connection failed");
+        exit(1);
+    }
+
+    printf("Connected to Hospital Server!\n");
+
+    while (1)
+    {
+        int choice;
+        int id, age;
+        char name[50];
+
+        printf("\n=================================\n");
+        printf(" HOSPITAL APPOINTMENT SYSTEM\n");
+        printf("=================================\n");
+        printf("1. Register Patient\n");
+        printf("2. Search Doctor Availability\n");
+        printf("3. Book Appointment\n");
+        printf("4. Cancel Appointment\n");
+        printf("5. View Appointment History\n");
+        printf("6. Exit\n");
+        printf("Enter choice: ");
+
+        scanf("%d", &choice);
+
+        if (choice == 1)
+        {
+            printf("Enter patient name (single word): ");
+            scanf("%s", name);
+
+            printf("Enter age: ");
+            scanf("%d", &age);
+
+            sprintf(buffer,
+                    "1 %s %d",
+                    name, age);
+        }
+
+        else if (choice == 2)
+        {
+            sprintf(buffer, "2");
+        }
+
+        else if (choice == 3)
+        {
+            printf("Enter Patient ID: ");
+            scanf("%d", &id);
+
+            printf("Enter Doctor ID: ");
+            scanf("%d", &age);
+
+            sprintf(buffer,
+                    "3 %d %d",
+                    id, age);
+        }
+
+        else if (choice == 4)
+        {
+            printf("Enter Appointment ID: ");
+            scanf("%d", &id);
+
+            sprintf(buffer,
+                    "4 %d",
+                    id);
+        }
+
+        else if (choice == 5)
+        {
+            printf("Enter Patient ID: ");
+            scanf("%d", &id);
+
+            sprintf(buffer,
+                    "5 %d",
+                    id);
+        }
+
+        else if (choice == 6)
+        {
+            sprintf(buffer, "6");
+
+            send(sock,
+                 buffer,
+                 strlen(buffer),
+                 0);
+
+            memset(buffer, 0, sizeof(buffer));
+
+            recv(sock,
+                 buffer,
+                 sizeof(buffer) - 1,
+                 0);
+
+            printf("\n%s\n", buffer);
+
+            break;
+        }
+
+        else
+        {
+            printf("Invalid choice!\n");
+            continue;
+        }
+
+        send(sock,
+             buffer,
+             strlen(buffer),
+             0);
+
+        memset(buffer, 0, sizeof(buffer));
+
+        int n = recv(sock,
+                     buffer,
+                     sizeof(buffer) - 1,
+                     0);
+
+        if (n > 0)
+        {
+            buffer[n] = '\0';
+
+            printf("\n%s\n", buffer);
+        }
+    }
+
+    close(sock);
+
+    return 0;
+}
