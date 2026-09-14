@@ -1,0 +1,293 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+#define PORT 8081
+#define BUFFER_SIZE 1024
+#define FILE_DIR "files"
+
+void send_file_list(int client)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char buffer[BUFFER_SIZE] = "";
+
+    dir = opendir(FILE_DIR);
+
+    if (dir == NULL)
+    {
+        send(client, "No files available.\n",
+             20, 0);
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (strcmp(entry->d_name, ".") != 0 &&
+            strcmp(entry->d_name, "..") != 0)
+        {
+            strcat(buffer, entry->d_name);
+            strcat(buffer, "\n");
+        }
+    }
+
+    closedir(dir);
+
+    if (strlen(buffer) == 0)
+        strcpy(buffer, "No files available.\n");
+
+    send(client, buffer, strlen(buffer), 0);
+}
+
+void send_file(int client, char *filename)
+{
+    char path[512];
+    char buffer[BUFFER_SIZE];
+    FILE *fp;
+    int bytes;
+
+    filename[strcspn(filename, "\n")] = '\0';
+
+    if (strstr(filename, "..") != NULL ||
+        strchr(filename, '/') != NULL)
+    {
+        send(client, "Invalid filename.\n", 19, 0);
+        return;
+    }
+
+    sprintf(path, "%s/%s", FILE_DIR, filename);
+
+    fp = fopen(path, "rb");
+
+    if (fp == NULL)
+    {
+        send(client, "FILE_NOT_FOUND", 14, 0);
+        return;
+    }
+
+    send(client, "FILE_FOUND", 10, 0);
+
+    while ((bytes = fread(buffer, 1,
+                          BUFFER_SIZE, fp)) > 0)
+    {
+        send(client, buffer, bytes, 0);
+    }
+
+    fclose(fp);
+
+    printf("File sent: %s\n", filename);
+}
+
+void *client_handler(void *arg)
+{
+    int client = *(int *)arg;
+    char buffer[BUFFER_SIZE];
+
+    free(arg);
+
+    while (1)
+    {
+        memset(buffer, 0, sizeof(buffer));
+
+        int n = recv(client, buffer,
+                     sizeof(buffer) - 1, 0);
+
+        if (n <= 0)
+            break;
+
+        buffer[n] = '\0';
+
+        if (strncmp(buffer, "LIST", 4) == 0)
+        {
+            send_file_list(client);
+        }
+        else if (strncmp(buffer, "GET ", 4) == 0)
+        {
+            send_file(client, buffer + 4);
+        }
+        else if (strncmp(buffer, "EXIT", 4) == 0)
+        {
+            break;
+        }
+        else
+        {
+            send(client, "Invalid command.\n", 17, 0);
+        }
+    }
+
+    close(client);
+    printf("Client disconnected.\n");
+
+    return NULL;
+}
+
+int main()
+{
+    int server, *client;
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t len = sizeof(client_addr);
+
+    mkdir(FILE_DIR, 0777);
+
+    server = socket(AF_INET, SOCK_STREAM, 0);
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(PORT);
+
+    bind(server,
+         (struct sockaddr *)&server_addr,
+         sizeof(server_addr));
+
+    listen(server, 10);
+
+    printf("File Sharing Server started...\n");
+    printf("Port: %d\n", PORT);
+    printf("Put files inside '%s' folder.\n", FILE_DIR);
+
+    while (1)
+    {
+        client = malloc(sizeof(int));
+
+        *client = accept(server,
+                         (struct sockaddr *)&client_addr,
+                         &len);
+
+        printf("Client connected.\n");
+
+        pthread_t thread;
+
+        pthread_create(&thread, NULL,
+                       client_handler, client);
+
+        pthread_detach(thread);
+    }
+
+    close(server);
+
+    return 0;
+}
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+#define PORT 8081
+#define BUFFER_SIZE 1024
+
+int main()
+{
+    int sock;
+    struct sockaddr_in server_addr;
+    char buffer[BUFFER_SIZE];
+    char filename[256];
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
+    server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    connect(sock,
+            (struct sockaddr *)&server_addr,
+            sizeof(server_addr));
+
+    while (1)
+    {
+        printf("\n===== FILE SHARING =====\n");
+        printf("1. List Files\n");
+        printf("2. Download File\n");
+        printf("3. Exit\n");
+        printf("Enter choice: ");
+
+        fgets(buffer, sizeof(buffer), stdin);
+
+        if (atoi(buffer) == 1)
+        {
+            send(sock, "LIST", 4, 0);
+
+            memset(buffer, 0, sizeof(buffer));
+
+            int n = recv(sock, buffer,
+                         sizeof(buffer) - 1, 0);
+
+            buffer[n] = '\0';
+
+            printf("\nAvailable Files:\n%s", buffer);
+        }
+        else if (atoi(buffer) == 2)
+        {
+            printf("Enter filename: ");
+            fgets(filename, sizeof(filename), stdin);
+
+            sprintf(buffer, "GET %s", filename);
+
+            send(sock, buffer, strlen(buffer), 0);
+
+            memset(buffer, 0, sizeof(buffer));
+
+            int n = recv(sock, buffer,
+                         sizeof(buffer) - 1, 0);
+
+            buffer[n] = '\0';
+
+            if (strcmp(buffer, "FILE_NOT_FOUND") == 0)
+            {
+                printf("File not found.\n");
+                continue;
+            }
+
+            if (strcmp(buffer, "FILE_FOUND") == 0)
+            {
+                filename[strcspn(filename, "\n")] = '\0';
+
+                char output[300];
+                sprintf(output, "downloaded_%s",
+                        filename);
+
+                FILE *fp = fopen(output, "wb");
+
+                while (1)
+                {
+                    n = recv(sock, buffer,
+                             sizeof(buffer), 0);
+
+                    if (n <= 0)
+                        break;
+
+                    fwrite(buffer, 1, n, fp);
+
+                    if (n < BUFFER_SIZE)
+                        break;
+                }
+
+                fclose(fp);
+
+                printf("File downloaded as %s\n",
+                       output);
+            }
+        }
+        else if (atoi(buffer) == 3)
+        {
+            send(sock, "EXIT", 4, 0);
+            break;
+        }
+        else
+        {
+            printf("Invalid choice.\n");
+        }
+    }
+
+    close(sock);
+
+    return 0;
+}
