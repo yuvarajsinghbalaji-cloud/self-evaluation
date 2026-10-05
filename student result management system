@@ -1,0 +1,631 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#define PORT 8080
+#define BUFFER_SIZE 2048
+#define DB_FILE "students.txt"
+
+typedef struct {
+    int reg_no;
+    char name[50];
+    char dept[20];
+    int semester;
+    float marks;
+    char grade[5];
+    float cgpa;
+} Student;
+
+// Log operations with timestamp
+void log_transaction(const char *ip, int port, const char *action) {
+    FILE *fp = fopen("server_log.txt", "a");
+    if (!fp) return;
+
+    time_t now = time(NULL);
+    char *time_str = ctime(&now);
+    time_str[strcspn(time_str, "\n")] = 0;
+
+    fprintf(fp, "[%s] [%s:%d] - %s\n", time_str, ip, port, action);
+    fclose(fp);
+}
+
+// Add a student record to the file
+void add_student(int client_sock, Student s, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "a+");
+    if (!fp) {
+        send(client_sock, "ERROR: Unable to open database file.", 36, 0);
+        return;
+    }
+
+    // Check if record exists
+    Student temp;
+    rewind(fp);
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &temp.reg_no, temp.name, temp.dept, &temp.semester, &temp.marks, temp.grade, &temp.cgpa) != EOF) {
+        if (temp.reg_no == s.reg_no) {
+            fclose(fp);
+            send(client_sock, "ERROR: Register number already exists.", 38, 0);
+            log_transaction(ip, port, "ADD Failed: Duplicate Register Number");
+            return;
+        }
+    }
+
+    fprintf(fp, "%d %s %s %d %.2f %s %.2f\n", s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+    fclose(fp);
+
+    log_transaction(ip, port, "ADD: Record added successfully");
+    send(client_sock, "SUCCESS: Student record added successfully.", 42, 0);
+}
+
+// Search student by Register Number
+void search_student(int client_sock, int reg_no, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    if (!fp) {
+        send(client_sock, "ERROR: Database empty or missing.", 33, 0);
+        return;
+    }
+
+    Student s;
+    int found = 0;
+    char response[BUFFER_SIZE];
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        if (s.reg_no == reg_no) {
+            snprintf(response, sizeof(response),
+                     "FOUND\nReg No: %d\nName: %s\nDept: %s\nSemester: %d\nMarks: %.2f\nGrade: %s\nCGPA: %.2f",
+                     s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+            found = 1;
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (found) {
+        send(client_sock, response, strlen(response), 0);
+        log_transaction(ip, port, "SEARCH: Record found");
+    } else {
+        send(client_sock, "ERROR: Student record not found.", 32, 0);
+        log_transaction(ip, port, "SEARCH Failed: Record not found");
+    }
+}
+
+// Update student record
+void update_student(int client_sock, Student updated, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    FILE *temp_fp = fopen("temp.txt", "w");
+
+    if (!fp || !temp_fp) {
+        send(client_sock, "ERROR: Database error during update.", 36, 0);
+        if (fp) fclose(fp);
+        if (temp_fp) fclose(temp_fp);
+        return;
+    }
+
+    Student s;
+    int found = 0;
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        if (s.reg_no == updated.reg_no) {
+            fprintf(temp_fp, "%d %s %s %d %.2f %s %.2f\n", updated.reg_no, updated.name, updated.dept, updated.semester, updated.marks, updated.grade, updated.cgpa);
+            found = 1;
+        } else {
+            fprintf(temp_fp, "%d %s %s %d %.2f %s %.2f\n", s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+        }
+    }
+
+    fclose(fp);
+    fclose(temp_fp);
+
+    remove(DB_FILE);
+    rename("temp.txt", DB_FILE);
+
+    if (found) {
+        send(client_sock, "SUCCESS: Student record updated successfully.", 44, 0);
+        log_transaction(ip, port, "UPDATE: Record updated");
+    } else {
+        send(client_sock, "ERROR: Student record not found.", 32, 0);
+        log_transaction(ip, port, "UPDATE Failed: Record not found");
+    }
+}
+
+// Delete student record
+void delete_student(int client_sock, int reg_no, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    FILE *temp_fp = fopen("temp.txt", "w");
+
+    if (!fp || !temp_fp) {
+        send(client_sock, "ERROR: Database error during deletion.", 38, 0);
+        if (fp) fclose(fp);
+        if (temp_fp) fclose(temp_fp);
+        return;
+    }
+
+    Student s;
+    int found = 0;
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        if (s.reg_no == reg_no) {
+            found = 1; // Skip writing to delete
+        } else {
+            fprintf(temp_fp, "%d %s %s %d %.2f %s %.2f\n", s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+        }
+    }
+
+    fclose(fp);
+    fclose(temp_fp);
+
+    remove(DB_FILE);
+    rename("temp.txt", DB_FILE);
+
+    if (found) {
+        send(client_sock, "SUCCESS: Record deleted successfully.", 36, 0);
+        log_transaction(ip, port, "DELETE: Record deleted");
+    } else {
+        send(client_sock, "ERROR: Student record not found.", 32, 0);
+        log_transaction(ip, port, "DELETE Failed: Record not found");
+    }
+}
+
+// Display all student records
+void display_all(int client_sock, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    if (!fp) {
+        send(client_sock, "ERROR: No records found.", 24, 0);
+        return;
+    }
+
+    Student s;
+    char buffer[BUFFER_SIZE] = "--- All Student Records ---\nRegNo\tName\tDept\tSem\tMarks\tGrade\tCGPA\n";
+    char line[256];
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        snprintf(line, sizeof(line), "%d\t%s\t%s\t%d\t%.2f\t%s\t%.2f\n", s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+        strcat(buffer, line);
+    }
+    fclose(fp);
+
+    send(client_sock, buffer, strlen(buffer), 0);
+    log_transaction(ip, port, "DISPLAY_ALL: Sent all records");
+}
+
+// Generate class topper details
+void generate_topper(int client_sock, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    if (!fp) {
+        send(client_sock, "ERROR: No records found.", 24, 0);
+        return;
+    }
+
+    Student s, topper;
+    float max_cgpa = -1.0;
+    int found = 0;
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        if (s.cgpa > max_cgpa) {
+            max_cgpa = s.cgpa;
+            topper = s;
+            found = 1;
+        }
+    }
+    fclose(fp);
+
+    if (found) {
+        char response[BUFFER_SIZE];
+        snprintf(response, sizeof(response),
+                 "--- Class Topper Details ---\nReg No: %d\nName: %s\nDept: %s\nSemester: %d\nMarks: %.2f\nGrade: %s\nCGPA: %.2f",
+                 topper.reg_no, topper.name, topper.dept, topper.semester, topper.marks, topper.grade, topper.cgpa);
+        send(client_sock, response, strlen(response), 0);
+        log_transaction(ip, port, "TOPPER: Calculated class topper");
+    } else {
+        send(client_sock, "ERROR: No records available.", 28, 0);
+    }
+}
+
+void handle_client(int client_sock, struct sockaddr_in client_addr) {
+    char buffer[BUFFER_SIZE];
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(client_addr.sin_addr), ip_str, INET_ADDRSTRLEN);
+    int port = ntohs(client_addr.sin_port);
+
+    log_transaction(ip_str, port, "Client connected");
+
+    while (1) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int bytes_read = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+        if (bytes_read <= 0) break;
+
+        buffer[strcspn(buffer, "\n")] = 0;
+
+        if (strncmp(buffer, "ADD", 3) == 0) {
+            Student s;
+            sscanf(buffer + 4, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa);
+            add_student(client_sock, s, ip_str, port);
+        } else if (strncmp(buffer, "SEARCH", 6) == 0) {
+            int reg_no;
+            sscanf(buffer + 7, "%d", &reg_no);
+            search_student(client_sock, reg_no, ip_str, port);
+        } else if (strncmp(buffer, "UPDATE", 6) == 0) {
+            Student s;
+            sscanf(buffer + 7, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa);
+            update_student(client_sock, s, ip_str, port);
+        } else if (strncmp(buffer, "DELETE", 6) == 0) {
+            int reg_no;
+            sscanf(buffer + 7, "%d", &reg_no);
+            delete_student(client_sock, reg_no, ip_str, port);
+        } else if (strcmp(buffer, "DISPLAY") == 0) {
+            display_all(client_sock, ip_str, port);
+        } else if (strcmp(buffer, "TOPPER") == 0) {
+            generate_topper(client_sock, ip_str, port);
+        } else if (strcmp(buffer, "EXIT") == 0) {
+            send(client_sock, "Session terminated.", 19, 0);
+            log_transaction(ip_str, port, "Client disconnected");
+            break;
+        } else {
+            send(client_sock, "ERROR: Invalid request.", 23, 0);
+            log_transaction(ip_str, port, "Invalid command received");
+        }
+    }
+
+    close(client_sock);
+}
+
+int main() {
+    int server_sock, client_sock;
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t addr_size = sizeof(client_addr);
+
+    server_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_sock < 0) {
+        perror("Socket creation failed");
+        exit(1);
+    }
+
+    int opt = 1;
+    setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(server_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind failed");
+        close(server_sock);
+        exit(1);
+    }
+
+    if (listen(server_sock, 5) == 0) {
+        printf("Student Management Server running on port %d...\n", PORT);
+    } else {
+        perror("Listen failed");
+        exit(1);
+    }
+
+    while (1) {
+        client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &addr_size);
+        if (client_sock < 0) continue;
+        handle_client(client_sock, client_addr);
+    }
+
+    close(server_sock);
+    return 0;
+}#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#define PORT 8080
+#define BUFFER_SIZE 2048
+#define DB_FILE "students.txt"
+
+typedef struct {
+    int reg_no;
+    char name[50];
+    char dept[20];
+    int semester;
+    float marks;
+    char grade[5];
+    float cgpa;
+} Student;
+
+// Log operations with timestamp
+void log_transaction(const char *ip, int port, const char *action) {
+    FILE *fp = fopen("server_log.txt", "a");
+    if (!fp) return;
+
+    time_t now = time(NULL);
+    char *time_str = ctime(&now);
+    time_str[strcspn(time_str, "\n")] = 0;
+
+    fprintf(fp, "[%s] [%s:%d] - %s\n", time_str, ip, port, action);
+    fclose(fp);
+}
+
+// Add a student record to the file
+void add_student(int client_sock, Student s, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "a+");
+    if (!fp) {
+        send(client_sock, "ERROR: Unable to open database file.", 36, 0);
+        return;
+    }
+
+    // Check if record exists
+    Student temp;
+    rewind(fp);
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &temp.reg_no, temp.name, temp.dept, &temp.semester, &temp.marks, temp.grade, &temp.cgpa) != EOF) {
+        if (temp.reg_no == s.reg_no) {
+            fclose(fp);
+            send(client_sock, "ERROR: Register number already exists.", 38, 0);
+            log_transaction(ip, port, "ADD Failed: Duplicate Register Number");
+            return;
+        }
+    }
+
+    fprintf(fp, "%d %s %s %d %.2f %s %.2f\n", s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+    fclose(fp);
+
+    log_transaction(ip, port, "ADD: Record added successfully");
+    send(client_sock, "SUCCESS: Student record added successfully.", 42, 0);
+}
+
+// Search student by Register Number
+void search_student(int client_sock, int reg_no, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    if (!fp) {
+        send(client_sock, "ERROR: Database empty or missing.", 33, 0);
+        return;
+    }
+
+    Student s;
+    int found = 0;
+    char response[BUFFER_SIZE];
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        if (s.reg_no == reg_no) {
+            snprintf(response, sizeof(response),
+                     "FOUND\nReg No: %d\nName: %s\nDept: %s\nSemester: %d\nMarks: %.2f\nGrade: %s\nCGPA: %.2f",
+                     s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+            found = 1;
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (found) {
+        send(client_sock, response, strlen(response), 0);
+        log_transaction(ip, port, "SEARCH: Record found");
+    } else {
+        send(client_sock, "ERROR: Student record not found.", 32, 0);
+        log_transaction(ip, port, "SEARCH Failed: Record not found");
+    }
+}
+
+// Update student record
+void update_student(int client_sock, Student updated, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    FILE *temp_fp = fopen("temp.txt", "w");
+
+    if (!fp || !temp_fp) {
+        send(client_sock, "ERROR: Database error during update.", 36, 0);
+        if (fp) fclose(fp);
+        if (temp_fp) fclose(temp_fp);
+        return;
+    }
+
+    Student s;
+    int found = 0;
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        if (s.reg_no == updated.reg_no) {
+            fprintf(temp_fp, "%d %s %s %d %.2f %s %.2f\n", updated.reg_no, updated.name, updated.dept, updated.semester, updated.marks, updated.grade, updated.cgpa);
+            found = 1;
+        } else {
+            fprintf(temp_fp, "%d %s %s %d %.2f %s %.2f\n", s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+        }
+    }
+
+    fclose(fp);
+    fclose(temp_fp);
+
+    remove(DB_FILE);
+    rename("temp.txt", DB_FILE);
+
+    if (found) {
+        send(client_sock, "SUCCESS: Student record updated successfully.", 44, 0);
+        log_transaction(ip, port, "UPDATE: Record updated");
+    } else {
+        send(client_sock, "ERROR: Student record not found.", 32, 0);
+        log_transaction(ip, port, "UPDATE Failed: Record not found");
+    }
+}
+
+// Delete student record
+void delete_student(int client_sock, int reg_no, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    FILE *temp_fp = fopen("temp.txt", "w");
+
+    if (!fp || !temp_fp) {
+        send(client_sock, "ERROR: Database error during deletion.", 38, 0);
+        if (fp) fclose(fp);
+        if (temp_fp) fclose(temp_fp);
+        return;
+    }
+
+    Student s;
+    int found = 0;
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        if (s.reg_no == reg_no) {
+            found = 1; // Skip writing to delete
+        } else {
+            fprintf(temp_fp, "%d %s %s %d %.2f %s %.2f\n", s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+        }
+    }
+
+    fclose(fp);
+    fclose(temp_fp);
+
+    remove(DB_FILE);
+    rename("temp.txt", DB_FILE);
+
+    if (found) {
+        send(client_sock, "SUCCESS: Record deleted successfully.", 36, 0);
+        log_transaction(ip, port, "DELETE: Record deleted");
+    } else {
+        send(client_sock, "ERROR: Student record not found.", 32, 0);
+        log_transaction(ip, port, "DELETE Failed: Record not found");
+    }
+}
+
+// Display all student records
+void display_all(int client_sock, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    if (!fp) {
+        send(client_sock, "ERROR: No records found.", 24, 0);
+        return;
+    }
+
+    Student s;
+    char buffer[BUFFER_SIZE] = "--- All Student Records ---\nRegNo\tName\tDept\tSem\tMarks\tGrade\tCGPA\n";
+    char line[256];
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        snprintf(line, sizeof(line), "%d\t%s\t%s\t%d\t%.2f\t%s\t%.2f\n", s.reg_no, s.name, s.dept, s.semester, s.marks, s.grade, s.cgpa);
+        strcat(buffer, line);
+    }
+    fclose(fp);
+
+    send(client_sock, buffer, strlen(buffer), 0);
+    log_transaction(ip, port, "DISPLAY_ALL: Sent all records");
+}
+
+// Generate class topper details
+void generate_topper(int client_sock, const char *ip, int port) {
+    FILE *fp = fopen(DB_FILE, "r");
+    if (!fp) {
+        send(client_sock, "ERROR: No records found.", 24, 0);
+        return;
+    }
+
+    Student s, topper;
+    float max_cgpa = -1.0;
+    int found = 0;
+
+    while (fscanf(fp, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa) != EOF) {
+        if (s.cgpa > max_cgpa) {
+            max_cgpa = s.cgpa;
+            topper = s;
+            found = 1;
+        }
+    }
+    fclose(fp);
+
+    if (found) {
+        char response[BUFFER_SIZE];
+        snprintf(response, sizeof(response),
+                 "--- Class Topper Details ---\nReg No: %d\nName: %s\nDept: %s\nSemester: %d\nMarks: %.2f\nGrade: %s\nCGPA: %.2f",
+                 topper.reg_no, topper.name, topper.dept, topper.semester, topper.marks, topper.grade, topper.cgpa);
+        send(client_sock, response, strlen(response), 0);
+        log_transaction(ip, port, "TOPPER: Calculated class topper");
+    } else {
+        send(client_sock, "ERROR: No records available.", 28, 0);
+    }
+}
+
+void handle_client(int client_sock, struct sockaddr_in client_addr) {
+    char buffer[BUFFER_SIZE];
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(client_addr.sin_addr), ip_str, INET_ADDRSTRLEN);
+    int port = ntohs(client_addr.sin_port);
+
+    log_transaction(ip_str, port, "Client connected");
+
+    while (1) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int bytes_read = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+        if (bytes_read <= 0) break;
+
+        buffer[strcspn(buffer, "\n")] = 0;
+
+        if (strncmp(buffer, "ADD", 3) == 0) {
+            Student s;
+            sscanf(buffer + 4, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa);
+            add_student(client_sock, s, ip_str, port);
+        } else if (strncmp(buffer, "SEARCH", 6) == 0) {
+            int reg_no;
+            sscanf(buffer + 7, "%d", &reg_no);
+            search_student(client_sock, reg_no, ip_str, port);
+        } else if (strncmp(buffer, "UPDATE", 6) == 0) {
+            Student s;
+            sscanf(buffer + 7, "%d %s %s %d %f %s %f", &s.reg_no, s.name, s.dept, &s.semester, &s.marks, s.grade, &s.cgpa);
+            update_student(client_sock, s, ip_str, port);
+        } else if (strncmp(buffer, "DELETE", 6) == 0) {
+            int reg_no;
+            sscanf(buffer + 7, "%d", &reg_no);
+            delete_student(client_sock, reg_no, ip_str, port);
+        } else if (strcmp(buffer, "DISPLAY") == 0) {
+            display_all(client_sock, ip_str, port);
+        } else if (strcmp(buffer, "TOPPER") == 0) {
+            generate_topper(client_sock, ip_str, port);
+        } else if (strcmp(buffer, "EXIT") == 0) {
+            send(client_sock, "Session terminated.", 19, 0);
+            log_transaction(ip_str, port, "Client disconnected");
+            break;
+        } else {
+            send(client_sock, "ERROR: Invalid request.", 23, 0);
+            log_transaction(ip_str, port, "Invalid command received");
+        }
+    }
+
+    close(client_sock);
+}
+
+int main() {
+    int server_sock, client_sock;
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t addr_size = sizeof(client_addr);
+
+    server_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_sock < 0) {
+        perror("Socket creation failed");
+        exit(1);
+    }
+
+    int opt = 1;
+    setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(server_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind failed");
+        close(server_sock);
+        exit(1);
+    }
+
+    if (listen(server_sock, 5) == 0) {
+        printf("Student Management Server running on port %d...\n", PORT);
+    } else {
+        perror("Listen failed");
+        exit(1);
+    }
+
+    while (1) {
+        client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &addr_size);
+        if (client_sock < 0) continue;
+        handle_client(client_sock, client_addr);
+    }
+
+    close(server_sock);
+    return 0;
+}
